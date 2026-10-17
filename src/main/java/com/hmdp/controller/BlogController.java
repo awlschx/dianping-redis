@@ -45,9 +45,9 @@ public class BlogController {
 
     @PutMapping("/like/{id}")
     public Result likeBlog(@PathVariable("id") Long id) {
-        // 修改点赞数量
+        // 点赞或取消点赞，返回操作后的点赞状态
         Boolean isLiked = blogService.likeBlog(id);
-        return Result.ok();
+        return Result.ok(isLiked);
     }
 
     @GetMapping("/of/me")
@@ -81,7 +81,6 @@ public class BlogController {
     }
     @GetMapping("/{id}")
     public Result queryBlogById(@PathVariable("id") Long id){
-        blogService.queryBlogById(id);
-        return Result.ok();
+        return blogService.queryBlogById(id);
     }
 }
