@@ -1,21 +1,30 @@
 package com.hmdp.service.impl;
 
 import cn.hutool.core.util.BooleanUtil;
+import cn.hutool.core.util.StrUtil;
 import com.hmdp.dto.Result;
+import com.hmdp.dto.ScrollResult;
 import com.hmdp.dto.UserDTO;
 import com.hmdp.entity.Blog;
+import com.hmdp.entity.Follow;
 import com.hmdp.entity.User;
 import com.hmdp.mapper.BlogMapper;
 import com.hmdp.service.IBlogService;
 import com.baomidou.mybatisplus.extension.service.impl.ServiceImpl;
+import com.hmdp.service.IFollowService;
 import com.hmdp.service.IUserService;
 import com.hmdp.utils.UserHolder;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.data.redis.core.ZSetOperations;
 import org.springframework.stereotype.Service;
 
 import javax.annotation.Resource;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 
 import static com.hmdp.utils.RedisConstants.BLOG_LIKED_KEY;
+import static com.hmdp.utils.RedisConstants.FEED_KEY;
 
 /**
  * <p>
@@ -32,7 +41,75 @@ public class BlogServiceImpl extends ServiceImpl<BlogMapper, Blog> implements IB
     @Resource
     private IUserService userService;
     @Resource
+    private IFollowService followService;
+    @Resource
     private StringRedisTemplate stringRedisTemplate;
+
+    @Override
+    public Result saveBlog(Blog blog) {
+        //获取登录用户
+        UserDTO user = UserHolder.getUser();
+        blog.setUserId(user.getId());
+        //保存探店笔记
+        boolean isSuccess = save(blog);
+        if (!isSuccess) {
+            return Result.fail("新增笔记失败");
+        }
+        //查询作者的所有粉丝
+        List<Follow> follows = followService.query()
+                .eq("follow_user_id", user.getId()).list();
+        //把笔记id推送到每个粉丝的收件箱，分数为发布时间
+        for (Follow follow : follows) {
+            stringRedisTemplate.opsForZSet().add(
+                    FEED_KEY + follow.getUserId(),
+                    blog.getId().toString(),
+                    System.currentTimeMillis());
+        }
+        return Result.ok(blog.getId());
+    }
+
+    @Override
+    public Result queryBlogOfFollow(Long max, Integer offset) {
+        //获取当前登录用户
+        Long userId = UserHolder.getUser().getId();
+        String key = FEED_KEY + userId;
+        //从收件箱按时间倒序取出2条
+        Set<ZSetOperations.TypedTuple<String>> typedTuples = stringRedisTemplate.opsForZSet()
+                .reverseRangeByScoreWithScores(key, 0, max, offset, 2);
+        if (typedTuples == null || typedTuples.isEmpty()) {
+            return Result.ok();
+        }
+        //解析笔记id、最小时间戳和偏移量
+        List<Long> ids = new ArrayList<>(typedTuples.size());
+        long minTime = 0;
+        int os = 1;
+        for (ZSetOperations.TypedTuple<String> tuple : typedTuples) {
+            ids.add(Long.valueOf(tuple.getValue()));
+            long time = tuple.getScore().longValue();
+            if (time == minTime) {
+                os++;
+            } else {
+                minTime = time;
+                os = 1;
+            }
+        }
+        //根据id查询笔记，并按收件箱顺序排序
+        List<Blog> blogs = query().in("id", ids)
+                .last("ORDER BY FIELD(id," + StrUtil.join(",", ids) + ")").list();
+        for (Blog blog : blogs) {
+            User author = userService.getById(blog.getUserId());
+            blog.setName(author.getNickName());
+            blog.setIcon(author.getIcon());
+            blog.setIsLike(isBlogLiked(blog.getId()));
+        }
+        //封装滚动分页结果
+        ScrollResult r = new ScrollResult();
+        r.setList(blogs);
+        r.setOffset(os);
+        r.setMinTime(minTime);
+        return Result.ok(r);
+    }
+
     @Override
     public Result queryBlogById(Long id) {
         //查询blog
